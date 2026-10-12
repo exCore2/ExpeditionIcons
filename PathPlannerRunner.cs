@@ -12,14 +12,17 @@ using ExpeditionIcons.PathPlannerData;
 
 namespace ExpeditionIcons;
 
-public class PathPlannerRunner
+public class PathPlannerRunner : IDisposable
 {
     private readonly CancellationTokenSource _cts = new CancellationTokenSource();
     public bool IsRunning => _task is { IsCompleted: false };
     private PathPlanner _pathPlanner;
     private ExpeditionEnvironment _environment;
     private BestValue[] BestValues;
-    private readonly ConditionalWeakTable<List<Vector2>, PathPlanner.DetailedLootScore> _lootCache = [];
+    //The UI asks for the best path's detailed score every frame, so it is computed once per
+    //candidate and cached here. Keys compare by reference, which means a candidate must not be
+    //mutated after it has been scored - MutatePath clones rather than editing in place.
+    private readonly ConditionalWeakTable<PathCandidate, PathPlanner.DetailedLootScore> _lootCache = [];
 
     public PathPlanner.DetailedLootScore CurrentBestPath
     {
@@ -46,19 +49,49 @@ public class PathPlannerRunner
 
     private Task _task;
 
-    public void Start(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    /// <summary>Completes when the search does, so a caller can run two of these back to back.</summary>
+    public Task Completion => _task ?? Task.CompletedTask;
+
+    /// <summary>Generations completed across every thread - the throughput half of any comparison.</summary>
+    public int TotalIterations => BestValues?.Sum(x => x?.Iteration ?? 0) ?? 0;
+
+    public void Start(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController,
+        Task<PathBoundModel> placementModel = null, GeodesicPlacementValidator validator = null)
     {
-        _task = Run(settings, environment, soundController);
+        _task = Run(settings, environment, soundController, placementModel, validator);
     }
 
-    private async Task Run(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController)
+    private async Task Run(PlannerSettings settings, ExpeditionEnvironment environment, SoundController soundController,
+        Task<PathBoundModel> placementModel, GeodesicPlacementValidator validator)
     {
         try
         {
+            //Awaited rather than polled: the rule has to be in place before the first candidate is
+            //built, or the search spends its opening generations under the old one.
+            if (validator != null)
+            {
+                environment = environment with { PlacementValidator = validator };
+            }
+            else if (placementModel != null && await placementModel is { } model)
+            {
+                environment = environment with
+                {
+                    PlacementValidator = new GeodesicPlacementValidator(
+                        model, allowWrapArounds: settings.GeodesicAllowWrapArounds),
+                };
+            }
+            else if (placementModel != null)
+            {
+                DebugWindow.LogError("ExpeditionIcons: geodesic placement is on but the area model could not be built - falling back to the original rule.");
+            }
+
             _environment = environment;
             _pathPlanner = new PathPlanner(settings);
             _pathPlanner.Init(environment);
             var threadCount = Math.Max(settings.SearchThreads.Value, 1);
+            //Read once, before the threads start: the settings object is live, and a search that
+            //picked up an edit halfway through would have its threads stopping at different times.
+            var generationTime = settings.GenerationTimeSeconds(environment.IsLogbook);
             BestValues = new BestValue[threadCount];
             var tasks = new List<Task>();
             for (int i = 0; i < threadCount; i++)
@@ -74,9 +107,9 @@ public class PathPlannerRunner
                         p.Init(environment);
                         foreach (var bestPath in p.GetBestPathSeries(environment))
                         {
-                            BestValues[ii] = new BestValue(bestPath.Points, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
+                            BestValues[ii] = new BestValue(bestPath.Candidate, bestPath.Score, (BestValues[ii]?.Iteration ?? 0) + 1, iterationSw.Elapsed.TotalMilliseconds);
                             iterationSw.Restart();
-                            if (sw.Elapsed.TotalSeconds >= settings.MaximumGenerationTimeSeconds.Value ||
+                            if (sw.Elapsed.TotalSeconds >= generationTime ||
                                 _cts.IsCancellationRequested)
                             {
                                 return;
@@ -111,6 +144,8 @@ public class PathPlannerRunner
     }
 
     public void Stop() => _cts.Cancel();
+
+    public void Dispose() => _cts.Dispose();
 }
 
-public record BestValue(List<Vector2> Path, double Score, int Iteration, double LastGenerationTime);
+public record BestValue(PathCandidate Path, double Score, int Iteration, double LastGenerationTime);

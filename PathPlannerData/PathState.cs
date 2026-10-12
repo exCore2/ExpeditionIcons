@@ -1,6 +1,3 @@
-﻿using System.Collections.Generic;
-using System.Numerics;
+﻿namespace ExpeditionIcons.PathPlannerData;
 
-namespace ExpeditionIcons.PathPlannerData;
-
-public record PathState(List<Vector2> Points, double Score);
+public record PathState(PathCandidate Candidate, double Score);

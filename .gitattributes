@@ -1,0 +1,5 @@
+# C# sources stay CRLF in both the index and the working tree, so tooling that
+# rewrites a whole file does not show up as a 5000-line diff.
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.sln text eol=crlf

@@ -1,5 +1,5 @@
 ﻿namespace ExpeditionIcons.PathPlannerData;
 
-public class RunicMonster : IMonster
+public class RunicMonster : IRunicMonster
 {
 }
